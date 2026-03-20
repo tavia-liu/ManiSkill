@@ -21,6 +21,7 @@ from typing import Any, List
 import numpy as np
 import sapien
 import torch
+from transforms3d.euler import euler2quat
 
 from mani_skill.agents.multi_agent import MultiAgent
 from mani_skill.agents.robots.panda import Panda
@@ -31,6 +32,11 @@ from mani_skill.utils.building.ground import build_ground
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.structs.pose import Pose
 from mani_skill.utils.structs.types import GPUMemoryConfig, SimConfig
+
+# Panda's URDF "forward" direction is +x.
+# Rotate 90° around z so each arm faces +y (toward the workspace in front of it).
+_ARM_QUAT = euler2quat(0, 0, np.pi / 2)
+_ARM_Y_OFFSET = -0.615  # same offset used by TableSceneBuilder for single-arm PickCube
 
 
 # Register 2-agent variant (most common; add more variants as needed)
@@ -96,9 +102,10 @@ class MultiPickBall(BaseEnv):
     # ------------------------------------------------------------------
 
     def _load_agent(self, options: dict):
-        # Place arms along x-axis, all facing +y
+        # Arms along x-axis at 0.4m spacing, each rotated 90° to face +y.
+        # y-offset mirrors the TableSceneBuilder single-arm setup (-0.615).
         poses = [
-            sapien.Pose(p=[i * self.arm_spacing, 0, 0])
+            sapien.Pose(p=[i * self.arm_spacing, _ARM_Y_OFFSET, 0], q=_ARM_QUAT)
             for i in range(self.n_arms)
         ]
         super()._load_agent(options, poses)
@@ -116,7 +123,7 @@ class MultiPickBall(BaseEnv):
                 radius=self.ball_radius,
                 color=[1.0, 0.3 + 0.1 * i, 0.0, 1.0],
                 name=f"ball_{i}",
-                initial_pose=sapien.Pose(p=[i * self.arm_spacing, 0.3, self.ball_radius]),
+                initial_pose=sapien.Pose(p=[i * self.arm_spacing, 0, self.ball_radius]),
             )
             self.balls.append(ball)
 
@@ -127,7 +134,7 @@ class MultiPickBall(BaseEnv):
                 name=f"goal_{i}",
                 body_type="kinematic",
                 add_collision=False,
-                initial_pose=sapien.Pose(p=[i * self.arm_spacing, 0.3, 0.15]),
+                initial_pose=sapien.Pose(p=[i * self.arm_spacing, 0, 0.15]),
             )
             self._hidden_objects.append(goal)
             self.goal_sites.append(goal)
@@ -155,29 +162,28 @@ class MultiPickBall(BaseEnv):
                 )
                 qpos[:, 7:] = 0.04  # keep gripper fully open
                 sub_agent.reset(qpos)
-                # Set base pose (facing +y along x-axis)
                 sub_agent.robot.set_pose(
-                    sapien.Pose(p=[i * self.arm_spacing, 0, 0])
+                    sapien.Pose(p=[i * self.arm_spacing, _ARM_Y_OFFSET, 0], q=_ARM_QUAT)
                 )
 
             for i in range(self.n_arms):
                 arm_x = i * self.arm_spacing
-                # Ball: random position in arm's workspace
-                # y: 0.2 ~ 0.45 m in front, x: ±0.12 m around arm base
+                # Ball: in front of arm in the +y direction (arm faces +y after rotation).
+                # Mirror the single-arm PickCube workspace: x ± 0.1, y ± 0.1 around (arm_x, 0).
                 xyz = torch.zeros((b, 3), device=self.device)
-                xyz[:, 0] = arm_x + (torch.rand((b,), device=self.device) * 0.24 - 0.12)
-                xyz[:, 1] = 0.20 + torch.rand((b,), device=self.device) * 0.25
+                xyz[:, 0] = arm_x + (torch.rand((b,), device=self.device) * 0.2 - 0.1)
+                xyz[:, 1] = torch.rand((b,), device=self.device) * 0.2 - 0.1
                 xyz[:, 2] = self.ball_radius
                 # sphere — orientation doesn't matter, use identity quaternion (w,x,y,z)
                 qs = torch.zeros((b, 4), device=self.device)
                 qs[:, 0] = 1.0  # w=1 → identity
                 self.balls[i].set_pose(Pose.create_from_pq(xyz, qs))
 
-                # Goal: same x-range but elevated ~10 cm above ground
+                # Goal: same xy range, elevated 10-30 cm above ground
                 goal_xyz = torch.zeros((b, 3), device=self.device)
-                goal_xyz[:, 0] = arm_x + (torch.rand((b,), device=self.device) * 0.24 - 0.12)
-                goal_xyz[:, 1] = 0.20 + torch.rand((b,), device=self.device) * 0.25
-                goal_xyz[:, 2] = 0.10 + torch.rand((b,), device=self.device) * 0.10
+                goal_xyz[:, 0] = arm_x + (torch.rand((b,), device=self.device) * 0.2 - 0.1)
+                goal_xyz[:, 1] = torch.rand((b,), device=self.device) * 0.2 - 0.1
+                goal_xyz[:, 2] = 0.10 + torch.rand((b,), device=self.device) * 0.20
                 self.goal_sites[i].set_pose(Pose.create_from_pq(goal_xyz))
 
     # ------------------------------------------------------------------
