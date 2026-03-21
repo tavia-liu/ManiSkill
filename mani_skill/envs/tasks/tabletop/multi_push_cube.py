@@ -1,13 +1,15 @@
 """
-MultiPushCube-v1 — Multi-agent version of ManiSkill's PushCube-v1.
+MultiPushCube-v1 — Multi-agent PushCube using TableSceneBuilder.
 
-Uses the EXACT same scene setup as official PushCube (TableSceneBuilder),
-so arm workspace and cube positions are correct. Each arm independently
-pushes its own cube to a goal. Reward function copied from official PushCube.
+Two Panda arms on opposite sides of a table (placed by TableSceneBuilder),
+each pushes its own cube to a goal. Reward identical to official PushCube.
 
-This task is the multi-agent equivalent of official PushCube-v1.
-If official PPO solves PushCube in 1.3M steps, HAPPO should solve this
-in similar time since the agents are fully independent.
+TableSceneBuilder coordinate system:
+  z = 0 is the TABLE SURFACE (not the ground).
+  Ground is at z = -0.92m.
+  For ("panda","panda"), arms are at y = -0.75 and y = +0.75, facing each other.
+
+This is a direct multi-agent copy of official PushCube-v1.
 """
 
 from typing import Any, List
@@ -29,26 +31,18 @@ from mani_skill.utils.structs.types import GPUMemoryConfig, SimConfig
 
 @register_env("MultiPushCube-v1", max_episode_steps=50)
 class MultiPushCube(BaseEnv):
-    """N Panda arms on tables, each pushes a cube to a goal. Same as official PushCube."""
+    """Two Panda arms on a table, each pushes its own cube to a goal."""
 
-    SUPPORTED_ROBOTS = [
-        ("panda", "panda"),
-        ("panda", "panda", "panda"),
-        ("panda", "panda", "panda", "panda"),
-    ]
+    SUPPORTED_ROBOTS = [("panda", "panda")]
 
     n_arms: int = 2
-    arm_spacing: float = 1.5       # enough space between tables
     cube_half_size: float = 0.02
     goal_radius: float = 0.1       # same as official PushCube
     robot_init_qpos_noise: float = 0.02
 
-    def __init__(self, *args, n_arms: int = 2, robot_uids=None,
+    def __init__(self, *args, robot_uids=("panda", "panda"),
                  robot_init_qpos_noise: float = 0.02, **kwargs):
-        self.n_arms = n_arms
         self.robot_init_qpos_noise = robot_init_qpos_noise
-        if robot_uids is None:
-            robot_uids = tuple(["panda"] * n_arms)
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
     @property
@@ -68,20 +62,13 @@ class MultiPushCube(BaseEnv):
     @property
     def _default_human_render_camera_configs(self):
         from mani_skill.sensors.camera import CameraConfig
-        pose = sapien_utils.look_at([3.0, 0, 2.0], [0.0, 0.0, 0.3])
+        pose = sapien_utils.look_at([0.6, 0.7, 0.6], [0.0, 0.0, 0.35])
         return CameraConfig("render_camera", pose, 512, 512, 1, 0.01, 100)
 
-    def _load_agent(self, options: dict):
-        # Place each arm at its own table position
-        # Official PushCube puts the arm at (-0.615, 0, 0) via TableSceneBuilder
-        poses = [
-            sapien.Pose(p=[i * self.arm_spacing - 0.615, 0, 0])
-            for i in range(self.n_arms)
-        ]
-        super()._load_agent(options, poses)
+    # Do NOT override _load_agent — let BaseEnv + TableSceneBuilder handle it
 
     def _load_scene(self, options: dict):
-        # Use TableSceneBuilder for proper table + arm setup
+        # TableSceneBuilder creates the table and handles arm placement
         self.table_scene = TableSceneBuilder(
             env=self, robot_init_qpos_noise=self.robot_init_qpos_noise
         )
@@ -91,15 +78,14 @@ class MultiPushCube(BaseEnv):
         self.goal_sites: List[Any] = []
 
         for i in range(self.n_arms):
-            offset_x = i * self.arm_spacing
-
             cube = actors.build_cube(
                 self.scene,
                 half_size=self.cube_half_size,
                 color=[1, 0, 0, 1],
                 name=f"cube_{i}",
                 body_type="dynamic",
-                initial_pose=sapien.Pose(p=[offset_x, 0, self.cube_half_size]),
+                # z=0 is table surface, cube sits on top
+                initial_pose=sapien.Pose(p=[0, 0, self.cube_half_size]),
             )
             self.cubes.append(cube)
 
@@ -110,10 +96,7 @@ class MultiPushCube(BaseEnv):
                 name=f"goal_{i}",
                 add_collision=False,
                 body_type="kinematic",
-                initial_pose=sapien.Pose(
-                    p=[offset_x + 0.1 + self.goal_radius, 0, 1e-3],
-                    q=euler2quat(0, np.pi / 2, 0),
-                ),
+                initial_pose=sapien.Pose(p=[0, 0, 1e-3], q=euler2quat(0, np.pi / 2, 0)),
             )
             self.goal_sites.append(goal)
 
@@ -121,36 +104,56 @@ class MultiPushCube(BaseEnv):
         with torch.device(self.device):
             b = len(env_idx)
 
-            # Let TableSceneBuilder handle robot init (adds qpos noise)
+            # Let TableSceneBuilder handle ALL robot init (qpos, pose)
             self.table_scene.initialize(env_idx)
 
-            for i in range(self.n_arms):
-                offset_x = i * self.arm_spacing
+            # Arms are now at:
+            #   agent 0: y = -0.75, facing +y (toward center)
+            #   agent 1: y = +0.75, facing -y (toward center)
+            # Table surface is z = 0.
+            # Each arm's workspace is roughly x ∈ [-0.2, 0.2], y from its side toward center.
 
-                # Cube: random xy on table, same as official PushCube
-                cube_xyz = torch.zeros((b, 3), device=self.device)
-                cube_xyz[:, 0] = offset_x + (torch.rand((b,), device=self.device) * 0.2 - 0.1)
-                cube_xyz[:, 1] = torch.rand((b,), device=self.device) * 0.2 - 0.1
-                cube_xyz[:, 2] = self.cube_half_size
-                qs = torch.zeros((b, 4), device=self.device)
-                qs[:, 0] = 1.0
-                self.cubes[i].set_pose(Pose.create_from_pq(cube_xyz, qs))
-                self.cubes[i].set_linear_velocity(torch.zeros((b, 3), device=self.device))
-                self.cubes[i].set_angular_velocity(torch.zeros((b, 3), device=self.device))
+            # Cube 0: in agent 0's workspace (y < 0 side)
+            cube0_xyz = torch.zeros((b, 3), device=self.device)
+            cube0_xyz[:, 0] = torch.rand((b,), device=self.device) * 0.2 - 0.1  # x ∈ [-0.1, 0.1]
+            cube0_xyz[:, 1] = -0.3 + torch.rand((b,), device=self.device) * 0.2  # y ∈ [-0.3, -0.1]
+            cube0_xyz[:, 2] = self.cube_half_size
+            qs = torch.zeros((b, 4), device=self.device)
+            qs[:, 0] = 1.0
+            self.cubes[0].set_pose(Pose.create_from_pq(cube0_xyz, qs))
+            self.cubes[0].set_linear_velocity(torch.zeros((b, 3), device=self.device))
+            self.cubes[0].set_angular_velocity(torch.zeros((b, 3), device=self.device))
 
-                # Goal: in front of cube (same logic as official PushCube)
-                goal_xyz = cube_xyz.clone()
-                goal_xyz[:, 0] = goal_xyz[:, 0] + 0.1 + self.goal_radius
-                goal_xyz[:, 2] = 1e-3
-                self.goal_sites[i].set_pose(
-                    Pose.create_from_pq(goal_xyz, euler2quat(0, np.pi / 2, 0))
-                )
+            # Goal 0: further from agent 0 (closer to center)
+            goal0_xyz = cube0_xyz.clone()
+            goal0_xyz[:, 1] = goal0_xyz[:, 1] + 0.1 + self.goal_radius  # push toward center
+            goal0_xyz[:, 2] = 1e-3
+            self.goal_sites[0].set_pose(
+                Pose.create_from_pq(goal0_xyz, euler2quat(0, np.pi / 2, 0))
+            )
+
+            # Cube 1: in agent 1's workspace (y > 0 side)
+            cube1_xyz = torch.zeros((b, 3), device=self.device)
+            cube1_xyz[:, 0] = torch.rand((b,), device=self.device) * 0.2 - 0.1
+            cube1_xyz[:, 1] = 0.1 + torch.rand((b,), device=self.device) * 0.2  # y ∈ [0.1, 0.3]
+            cube1_xyz[:, 2] = self.cube_half_size
+            self.cubes[1].set_pose(Pose.create_from_pq(cube1_xyz, qs))
+            self.cubes[1].set_linear_velocity(torch.zeros((b, 3), device=self.device))
+            self.cubes[1].set_angular_velocity(torch.zeros((b, 3), device=self.device))
+
+            # Goal 1: further from agent 1 (closer to center)
+            goal1_xyz = cube1_xyz.clone()
+            goal1_xyz[:, 1] = goal1_xyz[:, 1] - 0.1 - self.goal_radius  # push toward center
+            goal1_xyz[:, 2] = 1e-3
+            self.goal_sites[1].set_pose(
+                Pose.create_from_pq(goal1_xyz, euler2quat(0, np.pi / 2, 0))
+            )
 
     def _agent(self, idx: int) -> Panda:
         return self.agent.agents[idx]
 
     # ------------------------------------------------------------------
-    # Evaluate — same as official PushCube
+    # Evaluate
     # ------------------------------------------------------------------
 
     def evaluate(self):
@@ -169,7 +172,7 @@ class MultiPushCube(BaseEnv):
         return info
 
     # ------------------------------------------------------------------
-    # Obs extra — 18 dims per agent for HARL compatibility
+    # Obs extra — 18 dims per agent
     # ------------------------------------------------------------------
 
     def _get_obs_extra(self, info: dict):
@@ -193,7 +196,7 @@ class MultiPushCube(BaseEnv):
         return obs
 
     # ------------------------------------------------------------------
-    # Reward — EXACT same logic as official PushCube-v1
+    # Reward — same staged logic as official PushCube-v1
     # ------------------------------------------------------------------
 
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
@@ -205,22 +208,26 @@ class MultiPushCube(BaseEnv):
             cube_pos = self.cubes[i].pose.p
             goal_pos = self.goal_sites[i].pose.p
 
-            # Stage 1: reach behind cube (push from behind)
-            tcp_push_pose = cube_pos.clone()
-            tcp_push_pose[:, 0] = tcp_push_pose[:, 0] - self.cube_half_size - 0.005
-            tcp_to_push_dist = torch.linalg.norm(tcp_push_pose - tcp_pos, dim=1)
+            # Stage 1: reach the push position (behind cube, away from goal)
+            # Compute direction from cube to goal
+            direction = goal_pos[:, :2] - cube_pos[:, :2]
+            direction_norm = torch.linalg.norm(direction, dim=1, keepdim=True).clamp(min=1e-6)
+            direction = direction / direction_norm
+
+            push_pos = cube_pos.clone()
+            push_pos[:, :2] = push_pos[:, :2] - direction * (self.cube_half_size + 0.005)
+
+            tcp_to_push_dist = torch.linalg.norm(tcp_pos - push_pos, dim=1)
             reaching_reward = 1.0 - torch.tanh(5.0 * tcp_to_push_dist)
             agent_reward = reaching_reward
 
-            # Stage 2: push cube toward goal (only when reached)
+            # Stage 2: push cube toward goal (once reached)
             reached = tcp_to_push_dist < 0.01
-            obj_to_goal_dist = torch.linalg.norm(
-                cube_pos[:, :2] - goal_pos[:, :2], dim=1
-            )
+            obj_to_goal_dist = info[f"cube_{i}_to_goal_dist"]
             place_reward = 1.0 - torch.tanh(5.0 * obj_to_goal_dist)
             agent_reward = agent_reward + place_reward * reached.float()
 
-            # Stage 3: keep cube on surface
+            # Stage 3: keep cube on table
             z_deviation = torch.abs(cube_pos[:, 2] - self.cube_half_size)
             z_reward = 1.0 - torch.tanh(5.0 * z_deviation)
             agent_reward = agent_reward + place_reward * z_reward * reached.float()
