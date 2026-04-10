@@ -229,7 +229,8 @@ if __name__ == "__main__":
                 config=config,
                 name=run_name,
                 save_code=True,
-                group="PPO",
+                group="ppo",
+                job_type=args.env_id,
                 tags=["ppo", "walltime_efficient"]
             )
         writer = SummaryWriter(f"runs/{run_name}")
