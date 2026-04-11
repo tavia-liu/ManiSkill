@@ -8,7 +8,6 @@ from transforms3d.euler import euler2quat
 from mani_skill.agents.multi_agent import MultiAgent
 from mani_skill.agents.robots.panda import Panda
 from mani_skill.envs.sapien_env import BaseEnv
-from mani_skill.envs.utils.randomization.pose import random_quaternions
 from mani_skill.sensors.camera import CameraConfig
 from mani_skill.utils import sapien_utils
 from mani_skill.utils.building import actors
@@ -134,8 +133,14 @@ class TwoRobotPassStick(BaseEnv):
             goal_xyz[:, 2] = 0.15 + torch.rand((b,)) * 0.15  # 0.15 - 0.30 height
             self.goal_site.set_pose(Pose.create_from_pq(goal_xyz))
 
-            # Track if stick has ever been dropped
-            self.stick_dropped = torch.zeros(b, dtype=torch.bool, device=self.device)
+            # Track if stick has ever been grasped, and if it was dropped after
+            # Use full num_envs size so evaluate() works for all envs
+            if not hasattr(self, "stick_ever_grasped") or self.stick_ever_grasped.shape[0] != self.num_envs:
+                self.stick_ever_grasped = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+                self.stick_dropped = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            # Reset only the envs being reinitialized
+            self.stick_ever_grasped[env_idx] = False
+            self.stick_dropped[env_idx] = False
 
     @property
     def left_agent(self) -> Panda:
@@ -152,11 +157,14 @@ class TwoRobotPassStick(BaseEnv):
         is_left_grasping = self.left_agent.is_grasping(self.stick)
         is_right_grasping = self.right_agent.is_grasping(self.stick)
 
-        # Stick is dropped if it's below threshold and neither robot is holding it
+        # Track if anyone has ever grasped the stick
+        self.stick_ever_grasped = self.stick_ever_grasped | is_left_grasping | is_right_grasping
+
+        # Only count as dropped if it was previously grasped then fell
         table_z = self.stick_radius + 0.002
         stick_on_table = stick_pos[:, 2] < table_z
         nobody_holding = ~is_left_grasping & ~is_right_grasping
-        just_dropped = stick_on_table & nobody_holding
+        just_dropped = stick_on_table & nobody_holding & self.stick_ever_grasped
         self.stick_dropped = self.stick_dropped | just_dropped
 
         # Success: right robot holds stick at goal, left has released
@@ -173,6 +181,17 @@ class TwoRobotPassStick(BaseEnv):
             "stick_at_goal": stick_at_goal,
             "stick_dropped": self.stick_dropped,
         }
+
+    def get_state_dict(self):
+        state = super().get_state_dict()
+        state["stick_ever_grasped"] = self.stick_ever_grasped
+        state["stick_dropped"] = self.stick_dropped
+        return state
+
+    def set_state_dict(self, state_dict):
+        super().set_state_dict(state_dict)
+        self.stick_ever_grasped = state_dict["stick_ever_grasped"]
+        self.stick_dropped = state_dict["stick_dropped"]
 
     def _get_obs_extra(self, info: dict):
         obs = dict(
@@ -193,10 +212,8 @@ class TwoRobotPassStick(BaseEnv):
         stick_pos = self.stick.pose.p
         goal_pos = self.goal_site.pose.p
 
-        # Penalty for dropping the stick
+        # If stick is dropped, no reward (agent is stuck)
         reward = torch.zeros(self.num_envs, device=self.device)
-        reward[info["stick_dropped"]] = -5.0
-
         not_dropped = ~info["stick_dropped"]
 
         # Stage 1: Left robot reaches and grasps the stick
