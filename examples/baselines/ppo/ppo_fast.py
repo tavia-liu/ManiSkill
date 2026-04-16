@@ -364,6 +364,7 @@ if __name__ == "__main__":
                 name=run_name,
                 save_code=True,
                 group=args.wandb_group,
+                job_type=args.env_id,
                 tags=["ppo", "walltime_efficient", f"GPU:{torch.cuda.get_device_name()}"]
             )
         writer = SummaryWriter(f"runs/{run_name}")
