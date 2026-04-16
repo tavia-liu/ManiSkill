@@ -117,6 +117,9 @@ class TwoRobotStackCube(BaseEnv):
         with torch.device(self.device):
             b = len(env_idx)
             self.table_scene.initialize(env_idx)
+            if not hasattr(self, "cubes_ever_placed"):
+                self.cubes_ever_placed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            self.cubes_ever_placed[env_idx] = False
             # the table scene initializes two robots. the first one self.agents[0] is on the left and the second one is on the right
 
             torch.zeros((b, 3))
@@ -267,8 +270,9 @@ class TwoRobotStackCube(BaseEnv):
         reward[cubeB_placed_and_cubeA_grasped] = (
             4 + stage_3_reward[cubeB_placed_and_cubeA_grasped]
         )
-        # pass condition for stage 3
+        # pass condition for stage 3 — sticky flag so ungrasping doesn't drop reward
         cubes_placed = info["is_cubeA_on_cubeB"] * info["cubeB_placed"]
+        self.cubes_ever_placed = self.cubes_ever_placed | cubes_placed
         # Stage 4: get both robots to stop grasping
         gripper_width = (self.left_agent.robot.get_qlimits()[0, -1, 1] * 2).to(
             self.device
@@ -282,8 +286,8 @@ class TwoRobotStackCube(BaseEnv):
         )
         ungrasp_reward_right[~info["is_cubeB_grasped"]] = 1.0
 
-        reward[cubes_placed] = (
-            8 + (ungrasp_reward_left + ungrasp_reward_right)[cubes_placed] / 2
+        reward[self.cubes_ever_placed] = (
+            8 + (ungrasp_reward_left + ungrasp_reward_right)[self.cubes_ever_placed] / 2
         )
 
         reward[info["success"]] = 10
