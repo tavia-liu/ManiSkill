@@ -436,14 +436,20 @@ if __name__ == "__main__":
             eval_obs, _ = eval_envs.reset()
             eval_metrics = defaultdict(list)
             num_episodes = 0
+            term_total = 0
+            trunc_total = 0
             for _ in range(args.num_eval_steps):
                 with torch.no_grad():
                     eval_obs, eval_rew, eval_terminations, eval_truncations, eval_infos = eval_envs.step(agent.actor_mean(eval_obs))
+                    term_total += int(eval_terminations.sum())
+                    trunc_total += int(eval_truncations.sum())
                     if "final_info" in eval_infos:
                         mask = eval_infos["_final_info"]
                         num_episodes += mask.sum()
                         for k, v in eval_infos["final_info"]["episode"].items():
                             eval_metrics[k].append(v)
+            print(f"[diag] partial_reset={args.partial_reset}  "
+                  f"term={term_total}  trunc={trunc_total}  episodes_completed={int(num_episodes)}")
             eval_metrics_mean = {}
             for k, v in eval_metrics.items():
                 mean = torch.stack(v).float().mean()
