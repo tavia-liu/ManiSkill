@@ -7,7 +7,6 @@ from envs.wrappers.record_episode import RecordEpisodeWrapper
 from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 from mani_skill.utils.wrappers.gymnasium import CPUGymWrapper
 from mani_skill.utils.wrappers import FlattenRGBDObservationWrapper
-from mani_skill.utils.wrappers.flatten import FlattenActionSpaceWrapper
 from mani_skill.utils import gym_utils
 from functools import partial
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv, VectorEnv
@@ -66,7 +65,6 @@ def make_envs(cfg, num_envs, record_video_path, is_eval, logger):
 		if num_envs == 1:
 			vector_env_cls = SyncVectorEnv
 		wrappers = []
-		wrappers.append(lambda e: FlattenActionSpaceWrapper(e) if isinstance(e.action_space, gym.spaces.Dict) else e)
 		if cfg['obs'] == 'rgb':
 			wrappers.append(partial(PixelWrapper(cfg=cfg, num_envs=num_envs)))
 		env: VectorEnv = vector_env_cls(
@@ -80,8 +78,6 @@ def make_envs(cfg, num_envs, record_video_path, is_eval, logger):
 		env = env_make_fn(num_envs=num_envs)
 		control_mode = env.control_mode
 		max_episode_steps = gym_utils.find_max_episode_steps_value(env)
-		if isinstance(env.action_space, gym.spaces.Dict):
-			env = FlattenActionSpaceWrapper(env)
 		if cfg['obs'] == 'rgb':
 			env = FlattenRGBDObservationWrapper(env, rgb=True, depth=False, state=cfg.include_state)
 			env = PixelWrapper(cfg, env, num_envs)
