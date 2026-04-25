@@ -135,7 +135,7 @@ def put_text_on_image(image: np.ndarray, lines: list[str]):
         textheight = bbox[3] - bbox[1]
         y += textheight + 10
         x = 10
-        draw.text((x, y), text=line, fill=(0, 255, 0), font=TEXT_FONT)
+        draw.text((x, y), text=line, fill=(0, 0, 0), font=TEXT_FONT)
     return np.array(image)
 
 

@@ -678,7 +678,12 @@ class RecordEpisode(gym.Wrapper):
                         dtype=bool,
                     )
                     episode_info.update(
-                        success=self._trajectory_buffer.success[end_ptr - 1, env_idx]
+                        success=self._trajectory_buffer.success[end_ptr - 1, env_idx],
+                        success_once=bool(
+                            self._trajectory_buffer.success[
+                                start_ptr + 1 : end_ptr, env_idx
+                            ].any()
+                        ),
                     )
                 if self._trajectory_buffer.fail is not None:
                     group.create_dataset(
