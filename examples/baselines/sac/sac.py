@@ -280,6 +280,12 @@ if __name__ == "__main__":
     else:
         run_name = args.exp_name
 
+    results_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "results")
+    )
+    run_dir = os.path.join(results_root, args.env_id, "sac", run_name)
+    os.makedirs(run_dir, exist_ok=True)
+
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -298,13 +304,13 @@ if __name__ == "__main__":
         envs = FlattenActionSpaceWrapper(envs)
         eval_envs = FlattenActionSpaceWrapper(eval_envs)
     if args.capture_video or args.save_trajectory:
-        eval_output_dir = f"runs/{run_name}/videos"
+        eval_output_dir = f"{run_dir}/videos"
         if args.evaluate:
             eval_output_dir = f"{os.path.dirname(args.checkpoint)}/test_videos"
         print(f"Saving eval trajectories/videos to {eval_output_dir}")
         if args.save_train_video_freq is not None:
             save_video_trigger = lambda x : (x // args.num_steps) % args.save_train_video_freq == 0
-            envs = RecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False, save_video_trigger=save_video_trigger, max_steps_per_video=args.num_steps, video_fps=30)
+            envs = RecordEpisode(envs, output_dir=f"{run_dir}/train_videos", save_trajectory=False, save_video_trigger=save_video_trigger, max_steps_per_video=args.num_steps, video_fps=30)
         eval_envs = RecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=args.save_trajectory, save_video=args.capture_video, trajectory_name="trajectory", max_steps_per_video=args.num_eval_steps, video_fps=30, info_on_video=True)
     envs = ManiSkillVectorEnv(envs, args.num_envs, ignore_terminations=not args.partial_reset, record_metrics=True)
     eval_envs = ManiSkillVectorEnv(eval_envs, args.num_eval_envs, ignore_terminations=not args.eval_partial_reset, record_metrics=True)
@@ -330,7 +336,7 @@ if __name__ == "__main__":
                 job_type=args.env_id,
                 tags=["sac", "walltime_efficient"]
             )
-        writer = SummaryWriter(f"runs/{run_name}")
+        writer = SummaryWriter(run_dir)
         writer.add_text(
             "hyperparameters",
             "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
@@ -421,7 +427,7 @@ if __name__ == "__main__":
             actor.train()
 
             if args.save_model:
-                model_path = f"runs/{run_name}/ckpt_{global_step}.pt"
+                model_path = f"{run_dir}/ckpt_{global_step}.pt"
                 torch.save({
                     'actor': actor.state_dict(),
                     'qf1': qf1_target.state_dict(),
@@ -553,7 +559,7 @@ if __name__ == "__main__":
                 logger.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
 
     if not args.evaluate and args.save_model:
-        model_path = f"runs/{run_name}/final_ckpt.pt"
+        model_path = f"{run_dir}/final_ckpt.pt"
         torch.save({
             'actor': actor.state_dict(),
             'qf1': qf1_target.state_dict(),
