@@ -36,6 +36,7 @@ imgui.ini
 /demos
 /videos
 /examples/benchmarking/videos
+/results
 
 # benchmarking
 /benchmark_results
@@ -47,3 +48,4 @@ htmlcov/
 
 **/runs/
 **/wandb/
+

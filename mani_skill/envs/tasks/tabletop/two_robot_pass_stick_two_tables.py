@@ -22,12 +22,11 @@ from mani_skill.utils.structs.types import GPUMemoryConfig, SimConfig
 class TwoRobotPassStickTwoTables(BaseEnv):
     """
     **Task Description:**
-    Two robot arms must pass a stick between them across a *gap* between two
+    Two robot arms must pass a stick between them across a gap between two
     separate raised tables. Because the gap is wider than the stick is long,
     the only way to move the stick from the left table to the right table is
     to lift it through the air — pushing it over the edge will let it fall
-    into the gap. The left arm grasps the stick (typically near its -y end so
-    the +y end protrudes for the receiver), lifts it across the gap, the right
+    into the gap. The left arm grasps the stick, lifts it across the gap, the right
     arm regrasps the protruding end, the left arm releases, and the right arm
     places the stick at a goal position on the right table.
 
@@ -44,34 +43,29 @@ class TwoRobotPassStickTwoTables(BaseEnv):
     SUPPORTED_ROBOTS = [("panda_wristcam", "panda_wristcam")]
     agent: MultiAgent[Tuple[Panda, Panda]]
 
-    # Stick geometry: a box-shaped bar (won't roll like a cylinder).
-    # 3cm x 3cm cross-section, 26cm long along its local y-axis. Total length
-    # 0.26 < gap (0.40), so the stick cannot bridge the gap by being pushed.
     stick_half_width = 0.015
     stick_half_length = 0.13
 
-    # Two physically separate tables, one per robot, with a gap along y wider
-    # than the stick is long. Each table's top is at z = 0. The gap is empty 
-    # space. If the stick is dropped over it, it falls to the floor.
     table_top_z = 0.0
     table_height = 0.9196429  # matches TableSceneBuilder default table height
     table_half_size_x = 0.50
     table_half_size_y = 0.50
-    # Each table is centered on its robot base (which TableSceneBuilder
-    # anchors at y=±0.75) so the base sits at the center of its table box.
-    # Inner edges sit at y=±0.25 -> gap = 0.50 > stick (0.26).
+
     table_center_y_abs = 0.75
 
     @property
     def gap_half_width(self):
-        # Inner edge of each table along y; the empty gap spans (-x, +x).
         return self.table_center_y_abs - self.table_half_size_y
 
     # Success thresholds.
-    goal_radius = 0.06  # red/white target disc radius on the right table
+    goal_radius = 0.06 
 
-    # Mid-air clearance threshold (stick must rise above this while crossing the gap).
-    transit_min_z = 0.06
+    # Left arm parks the stick for the right arm to regrasp. 
+    # Centered over the gap (y=0) so both arms — bases at y=±0.75,
+    # max reach 0.855 m — can reach it (~0.79 m diagonal from each
+    # base with z=0.25). 
+    handoff_xyz = (0.0, 0.0, 0.25)
+    handoff_radius = 0.08  # stick is "at handoff" if center within this distance
 
     def __init__(
         self,
@@ -100,8 +94,6 @@ class TwoRobotPassStickTwoTables(BaseEnv):
 
     @property
     def _default_human_render_camera_configs(self):
-        # Pulled back along +x and raised to fit both tables (y spans ~2.4m)
-        # plus both robots into the frame.
         pose = sapien_utils.look_at(eye=[1.8, 0.0, 1.4], target=[0.0, 0.0, 0.05])
         return CameraConfig("render_camera", pose, 512, 512, 1, 0.01, 100)
 
@@ -111,17 +103,11 @@ class TwoRobotPassStickTwoTables(BaseEnv):
         )
 
     def _load_scene(self, options: dict):
-        # We use TableSceneBuilder for the ground plane and the two-Panda
-        # qpos / base-pose initialization, but we don't want its single big
-        # table — we want two separate tables with a gap. So we build it,
-        # then move the default table out of sight, and add our own tables.
         self.table_scene = TableSceneBuilder(
             env=self, robot_init_qpos_noise=self.robot_init_qpos_noise
         )
         self.table_scene.build()
         # The default table will be moved out of sight in _initialize_episode
-        # (set_pose can't run safely here — GPU rigid-body buffers aren't
-        # allocated yet during _load_scene).
         self._default_table_hidden_pose = sapien.Pose(p=[0, 0, -100.0])
 
         self._left_table_y = -self.table_center_y_abs
@@ -155,9 +141,6 @@ class TwoRobotPassStickTwoTables(BaseEnv):
             ),
         )
 
-        # Stick: a rectangular bar. Long axis is the box's local y, so the
-        # stick naturally lies along world y with identity orientation —
-        # no transient rotation needed. Flat faces prevent rolling.
         self.stick = actors.build_box(
             self.scene,
             half_sizes=[
@@ -170,8 +153,6 @@ class TwoRobotPassStickTwoTables(BaseEnv):
             initial_pose=sapien.Pose(p=[0, self._left_table_y, 0.3]),
         )
 
-        # Goal marker: a red/white target disc lying flat on the right
-        # table (visual only — no collision with the stick).
         self.goal_region = actors.build_red_white_target(
             self.scene,
             radius=self.goal_radius,
@@ -186,22 +167,13 @@ class TwoRobotPassStickTwoTables(BaseEnv):
         with torch.device(self.device):
             b = len(env_idx)
             self.table_scene.initialize(env_idx)
-            # Hide the default single table — we use our own two tables.
-            # (table_scene.initialize re-poses the default table each reset,
-            # so we override that pose here every reset.)
             self.table_scene.table.set_pose(self._default_table_hidden_pose)
             self.left_init_qpos = self.left_agent.robot.get_qpos()
 
-            # Place the stick lying along y on the left table, forward of
-            # the left arm toward the gap (left arm base at y=-0.75; the
-            # gap edge is at y=-0.25). Tight x range like PickCube.
             stick_xyz = torch.zeros((b, 3))
-            stick_xyz[:, 0] = torch.rand((b,)) * 0.10 - 0.05   # x in [-0.05, +0.05]
-            # y range chosen so the *low-y end* (stick.y - 0.13) clears the
-            # left base front edge (~y=-0.65) and the *high-y end* stays on
-            # the table (inner edge y=-0.25).
-            stick_xyz[:, 1] = -0.52 + torch.rand((b,)) * 0.12  # y in [-0.52, -0.40]
-            stick_xyz[:, 2] = self.table_top_z + self.stick_half_width + 0.002
+            stick_xyz[:, 0] = torch.rand((b,)) * 0.10 + 0.2   # x in [0.2, 0.3]
+            stick_xyz[:, 1] = -0.5 + torch.rand((b,)) * 0.1  # y in [-0.5, -0.4]
+            stick_xyz[:, 2] = self.table_top_z + self.stick_half_width
 
             # Box's long axis is already its local y -> identity orientation.
             stick_q = (
@@ -213,15 +185,12 @@ class TwoRobotPassStickTwoTables(BaseEnv):
             )
             self.stick.set_pose(Pose.create_from_pq(p=stick_xyz, q=stick_q))
 
-            # Goal: on the right table, *behind* the right arm in +y, well
-            # clear of the base footprint (right arm base at y=+0.75 with
-            # ~0.07 footprint; goal disc radius 0.06, so goal center y must
-            # be >= 0.75 + 0.07 + 0.06 ≈ 0.88 to fully clear).
+
             goal_xyz = torch.zeros((b, 3))
             goal_xyz[:, 0] = torch.rand((b,)) * 0.10 - 0.05  # x in [-0.05, +0.05]
-            goal_xyz[:, 1] = 1.05 + torch.rand((b,)) * 0.10  # y in [+1.00, +1.10]
+            goal_xyz[:, 1] = 1.05 + torch.rand((b,)) * 0.10  # y in [+1.05, +1.15]
             goal_xyz[:, 2] = self.table_top_z + 1e-3  # just above tabletop
-            # Rotate so the disc lies flat (StackCube convention).
+            # Rotate so the disc lies flat
             self.goal_region.set_pose(
                 Pose.create_from_pq(
                     p=goal_xyz,
@@ -245,7 +214,14 @@ class TwoRobotPassStickTwoTables(BaseEnv):
         is_right_grasping = self.right_agent.is_grasping(self.stick)
 
         stick_on_right_side = stick_pos[:, 1] >= self.gap_half_width
-        stick_lifted = stick_pos[:, 2] >= self.transit_min_z
+
+        handoff_target = torch.tensor(
+            self.handoff_xyz, device=self.device, dtype=stick_pos.dtype
+        )
+        stick_to_handoff_dist = torch.linalg.norm(
+            stick_pos - handoff_target, axis=1
+        )
+        stick_at_handoff = stick_to_handoff_dist <= self.handoff_radius
 
         # Stick is "at" the goal target if its xy is within the disc radius.
         goal_xy_dist = torch.linalg.norm(
@@ -260,7 +236,8 @@ class TwoRobotPassStickTwoTables(BaseEnv):
             "is_left_grasping": is_left_grasping,
             "is_right_grasping": is_right_grasping,
             "stick_on_right_side": stick_on_right_side,
-            "stick_lifted": stick_lifted,
+            "stick_at_handoff": stick_at_handoff,
+            "stick_to_handoff_dist": stick_to_handoff_dist,
             "stick_at_goal": stick_at_goal,
             "goal_xy_dist": goal_xy_dist,
         }
@@ -334,45 +311,11 @@ class TwoRobotPassStickTwoTables(BaseEnv):
         )
         left_tip_reward = (left_tip_height + left_tip_width) / 2
 
-        reward = reach_left + left_tip_reward + 2.0 * is_left_grasping.float()
-        # Stage 1 max ≈ 1 + 1 + 2 = 4
-
-        # ---------------------------------------------------------------
-        # Stage 2: With left grasping, lift the stick over the gap and push
-        # its y-coordinate past the right-table inner edge. PickCube-style
-        # 1D positional threshold for `cross` — only the left arm can move
-        # the stick, so this is a pure "left-does-its-job" signal with no
-        # right-arm hacking and no dependence on stick orientation.
-        stage_2_active = is_left_grasping
-        lift_reward = 1 - torch.tanh(
-            5 * torch.clamp(self.transit_min_z - stick_pos[:, 2], min=0.0)
-        )
-        # Slope 1.0 (not 5.0): the stick must travel ~0.70 m to satisfy
-        # this reward. With slope=5, tanh saturates immediately and the
-        # policy gets no gradient toward +y — it can flip the wrist
-        # backward at zero reward cost. Slope=1 keeps the gradient
-        # informative across the full approach distance.
-        cross_reward = 1 - torch.tanh(
-            1.0 * torch.clamp(self.gap_half_width - stick_pos[:, 1], min=0.0)
-        )
-        # Weight lift > cross so the agent learns to lift the stick before
-        # moving it sideways across the gap (otherwise it slides into the gap).
-        stage_2_reward = 2 * lift_reward + cross_reward
-        reward[stage_2_active] = 4 + stage_2_reward[stage_2_active]
-        # Stage 2 max ≈ 4 + 3 = 7
-
-        # ---------------------------------------------------------------
-        # Stage 3: Stick is lifted and on the right side -> right arm
-        # approaches the stick (target the center, like PickCube — a fat
-        # attractor, not the end) with a good pre-grasp, then grasps it.
-        stage_3_active = (
-            is_left_grasping & info["stick_lifted"] & info["stick_on_right_side"]
-        )
-        # Slope 1.0 (not 5.0): when stage 3 first activates the right TCP is
-        # ~1 m from the stick (right base at y=+0.75, stick just past y=-0.25).
-        # tanh(5 * 1.0) saturates near 1 -> reward ≈ 0 with no gradient toward
-        # the stick, so the right arm has no incentive to approach. Slope 1
-        # keeps the gradient informative across the full approach distance.
+        # Right-arm always-on reach to the stick center (fat attractor like
+        # PickCube). Gives the right arm a continuous distance gradient at
+        # all stages so it doesn't sit randomly until stage 3 fires.
+        # Slope 1.0: right TCP starts ~1 m from the stick — tanh(5*1)
+        # saturates and kills the gradient. Slope 1 keeps it informative.
         right_to_stick = torch.linalg.norm(right_tcp - stick_pos, axis=1)
         right_reach = 1 - torch.tanh(1.0 * right_to_stick)
 
@@ -387,36 +330,33 @@ class TwoRobotPassStickTwoTables(BaseEnv):
                 torch.linalg.norm(right_tip1 - right_tip2, axis=1) - 0.07
             )
         )
-        # Always-on tip preshape (PickCube pattern), no <0.15 m gate.
         right_tip_reward = (right_tip_height + right_tip_width) / 2
-        # Hold-still reward: without this, the left arm (which holds the
-        # stick) earns `right_reach` by dragging the stick toward the right
-        # TCP at the same time the right arm approaches the stick — both
-        # move and the system oscillates. Penalizing stick + left-arm
-        # velocity makes the left arm a stationary handoff target so the
-        # right arm has to do the approaching.
-        stick_lin_vel = torch.linalg.norm(self.stick.linear_velocity, axis=1)
-        stick_ang_vel = torch.linalg.norm(self.stick.angular_velocity, axis=1)
-        left_qvel = torch.linalg.norm(
-            self.left_agent.robot.get_qvel()[:, :-2], axis=1
-        )
-        hold_still = (
-            (1 - torch.tanh(5 * stick_lin_vel))
-            + (1 - torch.tanh(stick_ang_vel))
-            + (1 - torch.tanh(left_qvel))
-        ) / 3
-        stage_3_reward = (
-            right_reach
-            + right_tip_reward
-            + hold_still
-            + 2.0 * is_right_grasping.float()
-        )
-        reward[stage_3_active] = 7 + stage_3_reward[stage_3_active]
-        # Stage 3 max ≈ 7 + 1 + 1 + 1 + 2 = 12
+
+        reward = reach_left + left_tip_reward + 2.0 * is_left_grasping.float()
+        # Stage 1 max ≈ 1 + 1 + 2 = 4
 
         # ---------------------------------------------------------------
-        # Stage 4: Right is grasping -> left releases, retreats home, and
-        # stick stays clear of the gap.
+        # Stage 2: With left grasping, bring the stick to the fixed handoff
+        # target. Pure 3D distance gives one smooth gradient covering both
+        # lift and lateral motion — no separate lift threshold needed.
+        stage_2_active = is_left_grasping
+        # Slope 1.0: stick must travel ~0.8 m to reach handoff.
+        handoff_reach = 1 - torch.tanh(1.0 * info["stick_to_handoff_dist"])
+        stage_2_reward = 3 * handoff_reach
+        reward[stage_2_active] = 4 + stage_2_reward[stage_2_active]
+        # Stage 2 max ≈ 4 + 3 = 7
+
+        # ---------------------------------------------------------------
+        # Stage 3: Stick is at the handoff. The right arm's approach is
+        # already driven by the always-on `right_reach` term, so this stage
+        # only adds the grasp bonus.
+        stage_3_active = is_left_grasping & info["stick_at_handoff"]
+        stage_3_reward = 2.0 * is_right_grasping.float()
+        reward[stage_3_active] = 7 + stage_3_reward[stage_3_active]
+        # Stage 3 max ≈ 7 + 2 = 9
+
+        # ---------------------------------------------------------------
+        # Stage 4: Right is grasping -> left releases and retreats home.
         stage_4_active = is_right_grasping
         ungrasp_reward_left = (
             torch.sum(self.left_agent.robot.get_qpos()[:, -2:], axis=1)
@@ -430,12 +370,9 @@ class TwoRobotPassStickTwoTables(BaseEnv):
                 axis=1,
             )
         )
-        keep_lifted = 1 - torch.tanh(
-            5 * torch.clamp(self.transit_min_z - stick_pos[:, 2], min=0.0)
-        )
-        stage_4_reward = ungrasp_reward_left + left_arm_retreat + keep_lifted
-        reward[stage_4_active] = 12 + stage_4_reward[stage_4_active]
-        # Stage 4 max ≈ 12 + 3 = 15
+        stage_4_reward = ungrasp_reward_left + left_arm_retreat
+        reward[stage_4_active] = 9 + stage_4_reward[stage_4_active]
+        # Stage 4 max ≈ 9 + 2 = 11
 
         # ---------------------------------------------------------------
         # Stage 5: Right has sole possession -> bring the stick to the goal
@@ -444,8 +381,8 @@ class TwoRobotPassStickTwoTables(BaseEnv):
         stick_to_goal = torch.linalg.norm(stick_pos - self.goal_region.pose.p, axis=1)
         place_reward = 1 - torch.tanh(5 * stick_to_goal)
         stage_5_reward = 2 * place_reward + left_arm_retreat
-        reward[stage_5_active] = 15 + stage_5_reward[stage_5_active]
-        # Stage 5 max ≈ 15 + 2 + 1 = 18
+        reward[stage_5_active] = 11 + stage_5_reward[stage_5_active]
+        # Stage 5 max ≈ 11 + 3 = 14
 
         # ---------------------------------------------------------------
         # Stage 6: Stick is on the goal target -> right releases.
@@ -456,8 +393,14 @@ class TwoRobotPassStickTwoTables(BaseEnv):
         )
         ungrasp_reward_right[~is_right_grasping] = 1.0
         stage_6_reward = ungrasp_reward_right
-        reward[stage_6_active] = 18 + stage_6_reward[stage_6_active]
-        # Stage 6 max ≈ 18 + 1 = 19
+        reward[stage_6_active] = 14 + stage_6_reward[stage_6_active]
+        # Stage 6 max ≈ 14 + 1 = 15
+
+        # Always-on right-arm pre-park signal added on top of the staged
+        # reward so the right arm gets a continuous distance gradient
+        # toward the stick center regardless of which stage is active.
+        reward = reward + right_reach + right_tip_reward
+        # Total max ≈ 15 + 2 = 17
 
         reward[info["success"]] = 20
 
