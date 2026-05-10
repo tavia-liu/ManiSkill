@@ -61,7 +61,7 @@ class TwoRobotPassStick(BaseEnv):
         return self.table_center_y_abs - self.table_half_size_y
 
     # Success thresholds.
-    goal_radius = 0.06 
+    goal_radius = 0.1 
 
     # Left arm parks the stick for the right arm to regrasp.
     # Centered over the gap (y=0) so each arm reaches its OWN end of the
@@ -182,7 +182,7 @@ class TwoRobotPassStick(BaseEnv):
 
             stick_xyz = torch.zeros((b, 3))
             stick_xyz[:, 0] = torch.rand((b,)) * 0.10 - 0.05  # x in [-0.05, 0.05]
-            stick_xyz[:, 1] = -0.30 + torch.rand((b,)) * 0.02  # center y in [-0.30, -0.30]
+            stick_xyz[:, 1] = -0.30 + torch.rand((b,)) * 0.02  # center y in [-0.30, -0.28]
             stick_xyz[:, 2] = self.table_top_z + self.stick_half_width
 
             self.stick.set_pose(Pose.create_from_pq(p=stick_xyz))
@@ -423,18 +423,19 @@ class TwoRobotPassStick(BaseEnv):
         )[stage_5_active]
 
         # Stage 6: stick on goal → right releases.
-        # max ≈ 26 + 1 + 2 = 29
+        # Base 29 > Stage 5 max (28) so crossing into goal is rewarding.
+        # max ≈ 29 + 1 + 2 = 32
         stage_6_active = info["stick_at_goal"] & ~is_left_grasping
         reward[stage_6_active] = (
-            26 + ungrasp_reward_right + right_shape
+            29 + ungrasp_reward_right + right_shape
         )[stage_6_active]
 
         # Success terminal — dominates any non-success state.
-        reward[info["success"]] = 32
+        reward[info["success"]] = 35
 
         return reward
 
     def compute_normalized_dense_reward(
         self, obs: Any, action: torch.Tensor, info: dict
     ):
-        return self.compute_dense_reward(obs=obs, action=action, info=info) / 32
+        return self.compute_dense_reward(obs=obs, action=action, info=info) / 35
