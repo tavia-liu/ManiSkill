@@ -96,7 +96,7 @@ class TwoRobotPassStick(BaseEnv):
     @property
     def _default_sensor_configs(self):
         pose = sapien_utils.look_at(eye=[0.4, 0, 0.7], target=[-0.1, 0, 0.15])
-        return [CameraConfig("base_camera", pose, 128, 128, np.pi / 2, 0.01, 100)]
+        return [CameraConfig("base_camera", pose, 130, 130, np.pi / 2, 0.01, 100)]
 
     @property
     def _default_human_render_camera_configs(self):
@@ -182,7 +182,7 @@ class TwoRobotPassStick(BaseEnv):
 
             stick_xyz = torch.zeros((b, 3))
             stick_xyz[:, 0] = torch.rand((b,)) * 0.10 - 0.05  # x in [-0.05, 0.05]
-            stick_xyz[:, 1] = -0.30 + torch.rand((b,)) * 0.02  # center y in [-0.30, -0.28]
+            stick_xyz[:, 1] = -0.30 + torch.rand((b,)) * 0.02  # center y in [-0.30, -0.30]
             stick_xyz[:, 2] = self.table_top_z + self.stick_half_width
 
             self.stick.set_pose(Pose.create_from_pq(p=stick_xyz))
@@ -260,62 +260,47 @@ class TwoRobotPassStick(BaseEnv):
         is_left_grasping = info["is_left_grasping"]
         is_right_grasping = info["is_right_grasping"]
 
-        gripper_width = (self.left_agent.robot.get_qlimits()[0, -1, 1] * 2).to(
-            self.device
-        )
+        gripper_width = (
+            self.left_agent.robot.get_qlimits()[0, -1, 1] * 2
+        ).to(self.device)
 
+        # === Helpers ===
 
-
-        # Stage 1: Left arm reaches the stick with a pre-grasp tip-shape reward.
-        # Target the -y end of the stick. 
-        # Stage 1 max ≈ 1 + 1 + 2 = 4
+        # Left arm: reach the -y end of the stick.
         left_grasp_target = stick_pos.clone()
         left_grasp_target[:, 1] -= self.stick_half_length
-        left_to_target = torch.linalg.norm(left_tcp - left_grasp_target, axis=1)
-        reach_left = 1 - torch.tanh(5 * left_to_target)
+        reach_left = 1 - torch.tanh(
+            5 * torch.linalg.norm(left_tcp - left_grasp_target, axis=1)
+        )
 
+        # Left gripper shape (open + level).
         left_tip1 = self.left_agent.finger1_link.pose.p
         left_tip2 = self.left_agent.finger2_link.pose.p
         left_tip_height = 1 - torch.tanh(
             5 * torch.abs(left_tip1[:, 2] - left_tip2[:, 2])
         )
         left_tip_width = 1 - torch.tanh(
-            5
-            * torch.abs(
+            5 * torch.abs(
                 torch.linalg.norm(left_tip1 - left_tip2, axis=1) - 0.07
             )
         )
         left_tip_reward = (left_tip_height + left_tip_width) / 2
 
-        reward = reach_left + left_tip_reward + 2.0 * is_left_grasping.float()
-
-        # Stage 2: With left grasping, bring the stick to the fixed handoff
-        # target.
-        # Stage 2 max ≈ 4 + 3 = 7
-                
-        stage_2_active = is_left_grasping
+        # Stick to handoff (stage 2 carry).
         handoff_target = torch.tensor(
             self.handoff_xyz, device=self.device, dtype=stick_pos.dtype
         )
-        stick_to_handoff_dist = torch.linalg.norm(
-            stick_pos - handoff_target, axis=1
+        handoff_reach = 1 - torch.tanh(
+            5 * torch.linalg.norm(stick_pos - handoff_target, axis=1)
         )
-        handoff_reach = 1 - torch.tanh(5 * stick_to_handoff_dist)
-        stage_2_reward = 3 * handoff_reach
-        reward[stage_2_active] = 4 + stage_2_reward[stage_2_active]
 
-        # ---------------------------------------------------------------
-        # Stage 3: Stick is at the handoff. Aggressive shaping for the right
-        # arm regrasp:
-        #   - left_static: hold the stick steady (no rotation drift)
-        #   - finger_proximity: each fingertip close to the stick body
-        #   - 5x grasp bonus: closing the jaws pays off strongly
-        # Stage 3 max ≈ 7 + 5 + 1 + 1 = 14
-
-        # Penalize left-arm motion. 
+        # Left static (stage 3 hold).
         left_qvel = self.left_agent.robot.get_qvel()[:, :-2]
-        left_static = 1 - torch.tanh(5 * torch.linalg.norm(left_qvel, axis=1))
-        
+        left_static = 1 - torch.tanh(
+            5 * torch.linalg.norm(left_qvel, axis=1)
+        )
+
+        # Right fingertips near stick (stage 3 grasp positioning).
         right_finger1 = self.right_agent.finger1_link.pose.p
         right_finger2 = self.right_agent.finger2_link.pose.p
         finger1_close = 1 - torch.tanh(
@@ -326,64 +311,38 @@ class TwoRobotPassStick(BaseEnv):
         )
         right_finger_proximity = (finger1_close + finger2_close) / 2
 
-        stage_3_active = is_left_grasping & info["stick_at_handoff"]
-        stage_3_reward = (
-            3.0 * is_right_grasping.float()
-            + left_static
-            + right_finger_proximity
-        )
-        reward[stage_3_active] = 7 + stage_3_reward[stage_3_active]
-
-
-        # ---------------------------------------------------------------
-        # Stage 4: Right is grasping -> left releases and retreats home.
-        stage_4_active = is_right_grasping
+        # Left ungrasp + retreat (stage 4+).
         ungrasp_reward_left = (
             torch.sum(self.left_agent.robot.get_qpos()[:, -2:], axis=1)
             / gripper_width
         )
         ungrasp_reward_left[~is_left_grasping] = 1.0
+        # Slope 5: retreat is small (~0.2 m TCP, ~0.3-0.5 rad qpos delta).
         left_arm_retreat = 1 - torch.tanh(
-            torch.linalg.norm(
+            5 * torch.linalg.norm(
                 self.left_agent.robot.get_qpos()[:, :-2]
                 - self.left_init_qpos[:, :-2],
                 axis=1,
             )
         )
-        stage_4_reward = ungrasp_reward_left + left_arm_retreat
-        reward[stage_4_active] = 14 + stage_4_reward[stage_4_active]
-        # Stage 4 max ≈ 14 + 2 = 16
+        # Discrete cliff the moment left releases.
+        release_bonus = 3.0 * (~is_left_grasping).float()
 
-        # ---------------------------------------------------------------
-        # Stage 5: Right has sole possession -> bring the stick to the goal
-        # on the right table.
-        stage_5_active = is_right_grasping & ~is_left_grasping
-        stick_to_goal = torch.linalg.norm(stick_pos - self.goal_region.pose.p, axis=1)
-        # Goal is ~1.5 m from the handoff: slope 1.0 keeps the curve responsive
-        # across that journey instead of saturating at the start.
-        place_reward = 1 - torch.tanh(1.0 * stick_to_goal)
-        stage_5_reward = 2 * place_reward + left_arm_retreat
-        reward[stage_5_active] = 16 + stage_5_reward[stage_5_active]
-        # Stage 5 max ≈ 16 + 3 = 19
+        # Stick to goal (stage 5 placement).
+        place_reward = 1 - torch.tanh(
+            1.0 * torch.linalg.norm(
+                stick_pos - self.goal_region.pose.p, axis=1
+            )
+        )
 
-        # ---------------------------------------------------------------
-        # Stage 6: Stick is on the goal target -> right releases.
-        stage_6_active = info["stick_at_goal"] & ~is_left_grasping
+        # Right ungrasp (stage 6).
         ungrasp_reward_right = (
             torch.sum(self.right_agent.robot.get_qpos()[:, -2:], axis=1)
             / gripper_width
         )
         ungrasp_reward_right[~is_right_grasping] = 1.0
-        stage_6_reward = ungrasp_reward_right
-        reward[stage_6_active] = 19 + stage_6_reward[stage_6_active]
-        # Stage 6 max ≈ 19 + 1 = 20
 
-        # ---------------------------------------------------------------
-        # Always-on right-arm shaping: pre-position the right TCP at the
-        # exact pose needed to grasp the +y end at handoff (2 cm inside the
-        # end, 3 cm above the stick top — top-down grasp pose). Fixed point
-        # in world coords, reachable, so the right arm gets a clean gradient
-        # toward the right place from step 1.
+        # === Right-arm shaping (anchor pre-release / goal-pull post-release) ===
         right_grasp_target = torch.tensor(
             [
                 0.0,
@@ -393,38 +352,89 @@ class TwoRobotPassStick(BaseEnv):
             device=self.device,
             dtype=stick_pos.dtype,
         ).expand(stick_pos.shape[0], -1)
-        right_to_target = torch.linalg.norm(right_tcp - right_grasp_target, axis=1)
-        right_reach = 1 - torch.tanh(2.0 * right_to_target)
-        # Once grasping, full credit so this term doesn't drag the arm back
-        # to the handoff while it's trying to place the stick at the goal.
-        right_reach = right_reach.clone()
-        right_reach[is_right_grasping] = 1.0
-
+        right_pre_reach = 1 - torch.tanh(
+            2.0 * torch.linalg.norm(right_tcp - right_grasp_target, axis=1)
+        )
+        right_to_goal_reach = 1 - torch.tanh(
+            1.0 * torch.linalg.norm(
+                right_tcp - self.goal_region.pose.p, axis=1
+            )
+        )
+        post_release = is_right_grasping & ~is_left_grasping
+        right_reach = torch.where(
+            post_release, right_to_goal_reach, right_pre_reach
+        )
         right_tip1 = self.right_agent.finger1_link.pose.p
         right_tip2 = self.right_agent.finger2_link.pose.p
         right_tip_height = 1 - torch.tanh(
             5 * torch.abs(right_tip1[:, 2] - right_tip2[:, 2])
         )
         right_tip_width = 1 - torch.tanh(
-            5
-            * torch.abs(
+            5 * torch.abs(
                 torch.linalg.norm(right_tip1 - right_tip2, axis=1) - 0.07
             )
         )
-        right_tip_reward = (right_tip_height + right_tip_width) / 2
-        # Once grasping, give full credit so closing the gripper on the stick
-        # doesn't fight the grasp bonus.
-        right_tip_reward = right_tip_reward.clone()
-        right_tip_reward[is_right_grasping] = 1.0
+        right_tip_pose = (right_tip_height + right_tip_width) / 2
+        right_tip_pose = right_tip_pose.clone()
+        right_tip_pose[is_right_grasping] = 1.0
+        right_shape = right_reach + right_tip_pose  # max 2
 
-        reward = reward + right_reach + right_tip_reward
-        # Total max ≈ 20 + 2 = 22
+        # === Stage assignments — right_shape inlined per stage; no tail ===
 
-        reward[info["success"]] = 25
+        # Stage 1: pre-grasp; left approaches, right pre-positions.
+        # max ≈ 1 + 1 + 2 + 2 = 6
+        reward = (
+            reach_left + left_tip_reward + 2.0 * is_left_grasping.float()
+            + right_shape
+        )
+
+        # Stage 2: left grasping → carry stick to handoff.
+        # max ≈ 4 + 3 + 2 = 9
+        stage_2_active = is_left_grasping
+        reward[stage_2_active] = (
+            4 + 3 * handoff_reach + right_shape
+        )[stage_2_active]
+
+        # Stage 3: stick at handoff → right grasps; left holds steady.
+        # max ≈ 7 + 3 + 1 + 1 + 2 = 14
+        stage_3_active = is_left_grasping & info["stick_at_handoff"]
+        reward[stage_3_active] = (
+            7
+            + 3.0 * is_right_grasping.float()
+            + left_static
+            + right_finger_proximity
+            + right_shape
+        )[stage_3_active]
+
+        # Stage 4: right grasping → left releases & retreats.
+        # max ≈ 12 + 1 + 1 + 3 + 2 = 19
+        stage_4_active = is_right_grasping
+        reward[stage_4_active] = (
+            12
+            + ungrasp_reward_left + left_arm_retreat + release_bonus
+            + right_shape
+        )[stage_4_active]
+
+        # Stage 5: right has stick alone → carry to goal.
+        # max ≈ 17 + 8 + 1 + 2 = 28
+        stage_5_active = is_right_grasping & ~is_left_grasping
+        reward[stage_5_active] = (
+            17 + 8 * place_reward + left_arm_retreat + right_shape
+        )[stage_5_active]
+
+        # Stage 6: stick on goal → right releases.
+        # max ≈ 26 + 1 + 2 = 29
+        stage_6_active = info["stick_at_goal"] & ~is_left_grasping
+        reward[stage_6_active] = (
+            26 + ungrasp_reward_right + right_shape
+        )[stage_6_active]
+
+        # Success terminal — dominates any non-success state.
+        reward[info["success"]] = 32
 
         return reward
 
     def compute_normalized_dense_reward(
         self, obs: Any, action: torch.Tensor, info: dict
     ):
-        return self.compute_dense_reward(obs=obs, action=action, info=info) / 25
+        return self.compute_dense_reward(obs=obs, action=action, info=info) / 32
