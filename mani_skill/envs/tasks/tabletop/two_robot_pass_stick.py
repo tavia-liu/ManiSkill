@@ -9,7 +9,7 @@ from mani_skill.agents.multi_agent import MultiAgent
 from mani_skill.agents.robots.panda import Panda
 from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.sensors.camera import CameraConfig
-from mani_skill.utils import sapien_utils
+from mani_skill.utils import common, sapien_utils
 from mani_skill.utils.building import actors
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
@@ -217,12 +217,48 @@ class TwoRobotPassStick(BaseEnv):
 
         success = stick_at_goal & ~is_left_grasping & ~is_right_grasping
 
+        left_gripper_dist = torch.linalg.norm(
+            self.left_agent.finger1_link.pose.p
+            - self.left_agent.finger2_link.pose.p,
+            axis=1,
+        )
+        right_gripper_dist = torch.linalg.norm(
+            self.right_agent.finger1_link.pose.p
+            - self.right_agent.finger2_link.pose.p,
+            axis=1,
+        )
+
+        def _contact_angles_deg(agent: Panda):
+            # mirrors Panda.is_grasping: angle between each finger's opening
+            # direction and the contact force from `self.stick` on that finger
+            l_force = self.scene.get_pairwise_contact_forces(
+                agent.finger1_link, self.stick
+            )
+            r_force = self.scene.get_pairwise_contact_forces(
+                agent.finger2_link, self.stick
+            )
+            ldir = agent.finger1_link.pose.to_transformation_matrix()[..., :3, 1]
+            rdir = -agent.finger2_link.pose.to_transformation_matrix()[..., :3, 1]
+            return (
+                torch.rad2deg(common.compute_angle_between(ldir, l_force)),
+                torch.rad2deg(common.compute_angle_between(rdir, r_force)),
+            )
+
+        left_f1_angle, left_f2_angle = _contact_angles_deg(self.left_agent)
+        right_f1_angle, right_f2_angle = _contact_angles_deg(self.right_agent)
+
         return {
             "success": success,
             "is_left_grasping": is_left_grasping,
             "is_right_grasping": is_right_grasping,
             "stick_at_handoff": stick_at_handoff,
             "stick_at_goal": stick_at_goal,
+            "left_gripper_dist": left_gripper_dist,
+            "right_gripper_dist": right_gripper_dist,
+            "left_f1_angle": left_f1_angle,
+            "left_f2_angle": left_f2_angle,
+            "right_f1_angle": right_f1_angle,
+            "right_f2_angle": right_f2_angle,
         }
 
     def _get_obs_extra(self, info: dict):
