@@ -23,13 +23,13 @@ class TwoRobotPassStick(BaseEnv):
     **Task Description:**
     Two robot arms must pass a stick between them across a gap between two
     separate raised tables. The stick lies on the left table with its long
-    axis along world y (perpendicular to the gap). Because the gap is wider
-    than the stick is long, the only way to move it from the left table to
-    the right table is to lift it through the air — pushing it over the edge
-    will let it fall into the gap. The left arm grasps the near (-y) end of
-    the stick, lifts it across to a handoff above the gap, the right arm
-    regrasps the protruding (+y) end, the left arm releases, and the right
-    arm places the stick at a goal position on the right table.
+    axis along world x (parallel to the gap edges). Because the gap is wider
+    than the stick is long along y, the only way to move it from the left
+    table to the right table is to lift it through the air — pushing it over
+    the edge will let it fall into the gap. The left arm grasps the stick
+    from the -y side, lifts it to a handoff above the gap, the right arm
+    regrasps from the +y side, the left arm releases, and the right arm
+    places the stick at a goal position on the right table.
 
     **Randomizations:**
     - Stick xy on the left table is randomized.
@@ -142,8 +142,8 @@ class TwoRobotPassStick(BaseEnv):
         self.stick = actors.build_box(
             self.scene,
             half_sizes=[
-                self.stick_half_width,
                 self.stick_half_length,
+                self.stick_half_width,
                 self.stick_half_width,
             ],
             color=[0.6, 0.3, 0.1, 1.0],
@@ -253,12 +253,10 @@ class TwoRobotPassStick(BaseEnv):
         ).to(self.device)
         left_qpos = self.left_agent.robot.get_qpos()
 
-        # Stage 1: pre-grasp — left approaches -y end of stick.
+        # Stage 1: pre-grasp — left approaches stick center.
         # max ≈ 1 + 1 = 2 (grasp triggers Stage 2 override)
-        left_grasp_target = stick_pos.clone()
-        left_grasp_target[:, 1] -= self.stick_half_length
         reach_left = 1 - torch.tanh(
-            5 * torch.linalg.norm(left_tcp - left_grasp_target, axis=1)
+            5 * torch.linalg.norm(left_tcp - stick_pos, axis=1)
         )
         left_tip1 = self.left_agent.finger1_link.pose.p
         left_tip2 = self.left_agent.finger2_link.pose.p
@@ -281,26 +279,17 @@ class TwoRobotPassStick(BaseEnv):
         stage_2 = is_left_grasping
         reward[stage_2] = (5 + 3 * handoff_reach)[stage_2]
 
-        # Stage 3: stick at handoff → right approaches anchor; left holds steady.
+        # Stage 3: stick at handoff → right approaches stick center; left holds steady.
         # max ≈ 9 + 1 + 2 = 12 (right_grasp triggers Stage 4 override)
         left_static = 1 - torch.tanh(
             5 * torch.linalg.norm(self.left_agent.robot.get_qvel()[:, :-2], axis=1)
         )
-        right_anchor = torch.tensor(
-            [
-                0.0,
-                self.handoff_xyz[1] + self.stick_half_length - 0.02,
-                self.handoff_xyz[2] + 0.03,
-            ],
-            device=self.device,
-            dtype=stick_pos.dtype,
-        )
-        right_to_anchor = 1 - torch.tanh(
-            5 * torch.linalg.norm(right_tcp - right_anchor, axis=1)
+        right_to_stick = 1 - torch.tanh(
+            5 * torch.linalg.norm(right_tcp - stick_pos, axis=1)
         )
         stage_3 = is_left_grasping & info["stick_at_handoff"]
         reward[stage_3] = (
-            9 + left_static + 2 * right_to_anchor
+            9 + left_static + 2 * right_to_stick
         )[stage_3]
 
         # Stage 4: right grasping (left still grasping) → left opens gripper to release.
