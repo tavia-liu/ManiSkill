@@ -277,6 +277,19 @@ class TwoRobotPassStick(BaseEnv):
             )
         return obs
 
+    def _tcp_to_stick_segment_dist(self, tcp_pos):
+        """Distance from tcp_pos to the stick modeled as a 1D line segment
+        along its long (local x) axis."""
+        stick_pos = self.stick.pose.p
+        stick_x_axis = self.stick.pose.to_transformation_matrix()[..., :3, 0]
+        rel = tcp_pos - stick_pos
+        t = (rel * stick_x_axis).sum(axis=-1, keepdim=True)
+        t_clamped = torch.clamp(
+            t, -self.stick_half_length, self.stick_half_length
+        )
+        closest = stick_pos + t_clamped * stick_x_axis
+        return torch.linalg.norm(tcp_pos - closest, axis=-1)
+
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
         stick_pos = self.stick.pose.p
         goal_pos = self.goal_region.pose.p
@@ -289,10 +302,10 @@ class TwoRobotPassStick(BaseEnv):
         ).to(self.device)
         left_qpos = self.left_agent.robot.get_qpos()
 
-        # Stage 1: pre-grasp — left approaches stick center.
+        # Stage 1: pre-grasp — left approaches stick.
         # max ≈ 1 + 1 = 2 (grasp triggers Stage 2 override)
         reach_left = 1 - torch.tanh(
-            5 * torch.linalg.norm(left_tcp - stick_pos, axis=1)
+            5 * self._tcp_to_stick_segment_dist(left_tcp)
         )
         left_tip1 = self.left_agent.finger1_link.pose.p
         left_tip2 = self.left_agent.finger2_link.pose.p
@@ -315,13 +328,13 @@ class TwoRobotPassStick(BaseEnv):
         stage_2 = is_left_grasping
         reward[stage_2] = (5 + 3 * handoff_reach)[stage_2]
 
-        # Stage 3: stick at handoff → right approaches stick center; left holds steady.
+        # Stage 3: stick at handoff → right approaches stick; left holds steady.
         # max ≈ 9 + 1 + 2 = 12 (right_grasp triggers Stage 4 override)
         left_static = 1 - torch.tanh(
             5 * torch.linalg.norm(self.left_agent.robot.get_qvel()[:, :-2], axis=1)
         )
         right_to_stick = 1 - torch.tanh(
-            5 * torch.linalg.norm(right_tcp - stick_pos, axis=1)
+            5 * self._tcp_to_stick_segment_dist(right_tcp)
         )
         stage_3 = is_left_grasping & info["stick_at_handoff"]
         reward[stage_3] = (
