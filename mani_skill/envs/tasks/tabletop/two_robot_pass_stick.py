@@ -253,35 +253,8 @@ class TwoRobotPassStick(BaseEnv):
         ).to(self.device)
         left_qpos = self.left_agent.robot.get_qpos()
 
-        right_grasp_target = torch.tensor(
-            [
-                0.0,
-                self.handoff_xyz[1] + self.stick_half_length - 0.02,
-                self.handoff_xyz[2] + 0.03,
-            ],
-            device=self.device,
-            dtype=stick_pos.dtype,
-        ).expand(stick_pos.shape[0], -1)
-        goal_pull_active = (is_right_grasping | info["stick_at_goal"]) & ~is_left_grasping
-        right_reach = torch.where(
-            goal_pull_active,
-            1 - torch.tanh(1.0 * torch.linalg.norm(right_tcp - goal_pos, axis=1)),
-            1 - torch.tanh(2.0 * torch.linalg.norm(right_tcp - right_grasp_target, axis=1)),
-        )
-        right_tip1 = self.right_agent.finger1_link.pose.p
-        right_tip2 = self.right_agent.finger2_link.pose.p
-        right_tip_pose = (
-            (1 - torch.tanh(5 * torch.abs(right_tip1[:, 2] - right_tip2[:, 2])))
-            + (1 - torch.tanh(
-                5 * torch.abs(torch.linalg.norm(right_tip1 - right_tip2, axis=1) - 0.07)
-            ))
-        ) / 2
-        right_tip_pose = right_tip_pose.clone()
-        right_tip_pose[is_right_grasping] = 1.0
-        right_shape = right_reach + right_tip_pose
-
-        # Stage 1: pre-grasp — left approaches -y end, right pre-positions.
-        # max ≈ 1 + 1 + 2 + 2 = 6
+        # Stage 1: pre-grasp — left approaches -y end of stick.
+        # max ≈ 1 + 1 = 2 (grasp triggers Stage 2 override)
         left_grasp_target = stick_pos.clone()
         left_grasp_target[:, 1] -= self.stick_half_length
         reach_left = 1 - torch.tanh(
@@ -295,78 +268,73 @@ class TwoRobotPassStick(BaseEnv):
                 5 * torch.abs(torch.linalg.norm(left_tip1 - left_tip2, axis=1) - 0.07)
             ))
         ) / 2
-        reward = (
-            reach_left + left_tip_reward
-            + 2.0 * is_left_grasping.float()
-            + right_shape
-        )
+        reward = reach_left + left_tip_reward
 
         # Stage 2: left grasping → carry stick to handoff.
-        # max ≈ 4 + 3 + 2 = 9
+        # max ≈ 5 + 3 = 8
         handoff_target = torch.tensor(
             self.handoff_xyz, device=self.device, dtype=stick_pos.dtype
         )
         handoff_reach = 1 - torch.tanh(
-            5 * torch.linalg.norm(stick_pos - handoff_target, axis=1)
+            3 * torch.linalg.norm(stick_pos - handoff_target, axis=1)
         )
         stage_2 = is_left_grasping
-        reward[stage_2] = (4 + 3 * handoff_reach + right_shape)[stage_2]
+        reward[stage_2] = (5 + 3 * handoff_reach)[stage_2]
 
-        # Stage 3: stick at handoff → right grasps; left holds steady.
-        # max ≈ 7 + 3 + 1 + 1 + 2 = 14
+        # Stage 3: stick at handoff → right approaches anchor; left holds steady.
+        # max ≈ 9 + 1 + 2 = 12 (right_grasp triggers Stage 4 override)
         left_static = 1 - torch.tanh(
             5 * torch.linalg.norm(self.left_agent.robot.get_qvel()[:, :-2], axis=1)
         )
-        right_finger1 = self.right_agent.finger1_link.pose.p
-        right_finger2 = self.right_agent.finger2_link.pose.p
-        right_finger_proximity = (
-            (1 - torch.tanh(10 * torch.linalg.norm(right_finger1 - stick_pos, axis=1)))
-            + (1 - torch.tanh(10 * torch.linalg.norm(right_finger2 - stick_pos, axis=1)))
-        ) / 2
+        right_anchor = torch.tensor(
+            [
+                0.0,
+                self.handoff_xyz[1] + self.stick_half_length - 0.02,
+                self.handoff_xyz[2] + 0.03,
+            ],
+            device=self.device,
+            dtype=stick_pos.dtype,
+        )
+        right_to_anchor = 1 - torch.tanh(
+            5 * torch.linalg.norm(right_tcp - right_anchor, axis=1)
+        )
         stage_3 = is_left_grasping & info["stick_at_handoff"]
         reward[stage_3] = (
-            7 + 3.0 * is_right_grasping.float()
-            + left_static + right_finger_proximity + right_shape
+            9 + left_static + 2 * right_to_anchor
         )[stage_3]
 
-        # Stage 4: right grasping → left releases & retreats.
-        # max ≈ 12 + 1 + 1 + 3 + 2 = 19
+        # Stage 4: right grasping (left still grasping) → left opens gripper to release.
+        # max ≈ 16 + 1 + 1 = 18 (left release triggers Stage 5 override)
         ungrasp_reward_left = torch.sum(left_qpos[:, -2:], axis=1) / gripper_width
-        ungrasp_reward_left[~is_left_grasping] = 1.0
         left_arm_retreat = 1 - torch.tanh(
             5 * torch.linalg.norm(
                 left_qpos[:, :-2] - self.left_init_qpos[:, :-2], axis=1
             )
         )
-        # Discrete cliff the moment left releases.
-        release_bonus = 3.0 * (~is_left_grasping).float()
         stage_4 = is_right_grasping
         reward[stage_4] = (
-            12 + ungrasp_reward_left + left_arm_retreat + release_bonus + right_shape
+            16 + ungrasp_reward_left + left_arm_retreat
         )[stage_4]
 
         # Stage 5: right has stick alone → carry to goal.
-        # max ≈ 17 + 8 + 1 + 2 = 28
+        # max ≈ 19 + 8·(1-tanh(0.1)) + 1 ≈ 27 (stick_at_goal triggers Stage 6 override)
         place_reward = 1 - torch.tanh(
             1.0 * torch.linalg.norm(stick_pos - goal_pos, axis=1)
         )
         stage_5 = is_right_grasping & ~is_left_grasping
         reward[stage_5] = (
-            17 + 8 * place_reward + left_arm_retreat + right_shape
+            19 + 8 * place_reward + left_arm_retreat
         )[stage_5]
 
-        # Stage 6: stick in goal disc → right releases.
-        # Base 29 > Stage 5 max (28) so crossing into goal is rewarding.
-        # max ≈ 29 + 1 + 2 = 32
+        # Stage 6: stick in goal disc (right still grasping) → right opens gripper.
+        # max ≈ 29 + 3 = 32 (right release triggers success terminal)
         ungrasp_reward_right = (
             torch.sum(self.right_agent.robot.get_qpos()[:, -2:], axis=1)
             / gripper_width
         )
-        ungrasp_reward_right[~is_right_grasping] = 1.0
-        stage_6 = info["stick_at_goal"] & ~is_left_grasping
-        reward[stage_6] = (29 + ungrasp_reward_right + right_shape)[stage_6]
+        stage_6 = info["stick_at_goal"]
+        reward[stage_6] = (29 + 3 * ungrasp_reward_right)[stage_6]
 
-        # Success terminal — dominates any non-success state.
         reward[info["success"]] = 35
 
         return reward
