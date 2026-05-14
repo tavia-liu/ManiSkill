@@ -199,8 +199,8 @@ class TwoRobotPassStick(BaseEnv):
         stick_pos = self.stick.pose.p
         goal_pos = self.goal_region.pose.p
 
-        is_left_grasping = self.left_agent.is_grasping(self.stick)
-        is_right_grasping = self.right_agent.is_grasping(self.stick)
+        is_left_grasping = self.left_agent.is_grasping(self.stick,0.5,45)
+        is_right_grasping = self.right_agent.is_grasping(self.stick,0.5,45)
 
         handoff_target = torch.tensor(
             self.handoff_xyz, device=self.device, dtype=stick_pos.dtype
