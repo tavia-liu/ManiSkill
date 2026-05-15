@@ -17,19 +17,11 @@ from mani_skill.utils.structs.pose import Pose
 from mani_skill.utils.structs.types import GPUMemoryConfig, SimConfig
 
 
-@register_env("TwoRobotPassStickSimplified-v1", max_episode_steps=100)
-class TwoRobotPassStickSimplified(BaseEnv):
+@register_env("MultiRobotPassStick-v1", max_episode_steps=100)
+class MultiRobotPassStick(BaseEnv):
     """
     **Task Description:**
-   
-    **Randomizations:**
-    - Stick xy on the left table is randomized.
-    - Goal xy on the right table is randomized.
-
-    **Success Conditions:**
-    - The stick's xy position is within the goal disc (red/white target on
-      the right table; success if xy distance <= goal_radius).
-    - Neither arm is grasping the stick.
+    Multiple robot arms (2 or more) must pass a stick between them across a gap between two tables. 
     """
 
     SUPPORTED_ROBOTS = [("panda_wristcam", "panda_wristcam")]
@@ -39,20 +31,19 @@ class TwoRobotPassStickSimplified(BaseEnv):
     stick_half_length = 0.13
 
     table_top_z = 0.0
-    table_height = 0.9196429  # matches TableSceneBuilder default table height
+    table_height = 0.9196429
     table_half_size_x = 0.75
     table_half_size_y = 0.75
 
     table_center_y_abs = 0.90
 
-    @property
-    def gap_half_width(self):
-        return self.table_center_y_abs - self.table_half_size_y
+    goal_radius = 0.1
 
-    goal_radius = 0.1 
-
-    handoff_xyz = (0.0, 0.0, 0.25)
-    handoff_radius = 0.08  # stick is "at handoff" if center within this distance
+    # Reward hyperparameters.
+    # Reliability: with N_arms=2, alpha < 1/N = 0.5 keeps the goal gradient
+    # dominant. 0.3 leaves headroom so even if BOTH arms fall behind, the goal
+    # term (max 1.0) still exceeds the arm penalty cap (2 * alpha = 0.6).
+    alpha = 0.3
 
     def __init__(
         self,
@@ -157,7 +148,6 @@ class TwoRobotPassStickSimplified(BaseEnv):
             b = len(env_idx)
             self.table_scene.initialize(env_idx)
             self.table_scene.table.set_pose(self._default_table_hidden_pose)
-            self.left_init_qpos = self.left_agent.robot.get_qpos()
 
             stick_xyz = torch.zeros((b, 3))
             stick_xyz[:, 0] = torch.rand((b,)) * 0.10 - 0.05 
@@ -197,14 +187,13 @@ class TwoRobotPassStickSimplified(BaseEnv):
             torch.linalg.norm(stick_pos[:, :2] - goal_pos[:, :2], axis=1)
             <= self.goal_radius
         )
-
         success = stick_at_goal
 
         return {
             "success": success,
+            "stick_at_goal": stick_at_goal,
             "is_left_grasping": is_left_grasping,
             "is_right_grasping": is_right_grasping,
-            "stick_at_goal": stick_at_goal,
         }
 
     def _get_obs_extra(self, info: dict):
@@ -227,15 +216,19 @@ class TwoRobotPassStickSimplified(BaseEnv):
         stick_pos = self.stick.pose.p
         goal_pos = self.goal_region.pose.p
 
-        reward = 1 - torch.tanh(
-            1.0 * torch.linalg.norm(stick_pos - goal_pos, axis=1)
-        )
+        d_goal = torch.linalg.norm(stick_pos - goal_pos, axis=1)
+        r_goal = 1 - torch.tanh(d_goal)
 
-        reward[info["success"]] = 2
+        r_arms = 0.0
+        for arm in (self.left_agent, self.right_agent):
+            d_arm = torch.linalg.norm(arm.tcp.pose.p - stick_pos, axis=1)
+            r_arms = r_arms + (1 - torch.tanh(d_arm))
 
+        reward = r_goal + self.alpha * r_arms
+        reward[info["success"]] = 3.0
         return reward
 
     def compute_normalized_dense_reward(
         self, obs: Any, action: torch.Tensor, info: dict
     ):
-        return self.compute_dense_reward(obs=obs, action=action, info=info) / 2
+        return self.compute_dense_reward(obs, action, info) / 3.0
