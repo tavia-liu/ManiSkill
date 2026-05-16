@@ -40,10 +40,7 @@ class MultiRobotPassStick(BaseEnv):
     goal_radius = 0.1
 
     # Reward hyperparameters.
-    # Reliability: with N_arms=2, alpha < 1/N = 0.5 keeps the goal gradient
-    # dominant. 0.3 leaves headroom so even if BOTH arms fall behind, the goal
-    # term (max 1.0) still exceeds the arm penalty cap (2 * alpha = 0.6).
-    alpha = 0.3
+    alpha = 0.1
 
     def __init__(
         self,
