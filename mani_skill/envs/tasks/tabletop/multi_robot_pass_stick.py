@@ -222,6 +222,11 @@ class MultiRobotPassStick(BaseEnv):
             r_arms = r_arms + (1 - torch.tanh(d_arm))
 
         reward = r_goal + self.alpha * r_arms
+
+        # Hard penalty if stick falls into the gap (dropped more than one stick length below table top).
+        stick_fell = stick_pos[:, 2] < self.table_top_z - self.stick_half_length
+        reward[stick_fell] = -2.0
+
         reward[info["success"]] = 3.0
         return reward
 
