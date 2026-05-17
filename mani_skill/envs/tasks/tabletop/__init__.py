@@ -14,6 +14,7 @@ from .two_robot_stack_cube import TwoRobotStackCube
 from .two_robot_pass_stick import TwoRobotPassStick
 from .two_robot_pass_stick_simplified import TwoRobotPassStickSimplified
 from .multi_robot_pass_stick import MultiRobotPassStick
+from .multi_robot_pass_stick_delta import MultiRobotPassStickDelta
 from .poke_cube import PokeCubeEnv
 from .place_sphere import PlaceSphereEnv
 from .roll_ball import RollBallEnv
