@@ -216,16 +216,14 @@ class MultiRobotPassStick(BaseEnv):
         d_goal = torch.linalg.norm(stick_pos - goal_pos, axis=1)
         r_goal = 1 - torch.tanh(d_goal)
 
+        arms = (self.left_agent, self.right_agent)
         r_arms = 0.0
-        for arm in (self.left_agent, self.right_agent):
+        for arm in arms:
             d_arm = torch.linalg.norm(arm.tcp.pose.p - stick_pos, axis=1)
             r_arms = r_arms + (1 - torch.tanh(d_arm))
+        r_arms = r_arms / len(arms)
 
         reward = r_goal + self.alpha * r_arms
-
-        # Hard penalty if stick falls into the gap (dropped more than one stick length below table top).
-        stick_fell = stick_pos[:, 2] < self.table_top_z - self.stick_half_length
-        reward[stick_fell] = -2.0
 
         reward[info["success"]] = 3.0
         return reward
