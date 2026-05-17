@@ -41,6 +41,7 @@ class MultiRobotPassStick(BaseEnv):
 
     # Reward hyperparameters.
     alpha = 0.1
+    goal_dist_scale = 1.5
 
     def __init__(
         self,
@@ -214,7 +215,7 @@ class MultiRobotPassStick(BaseEnv):
         goal_pos = self.goal_region.pose.p
 
         d_goal = torch.linalg.norm(stick_pos - goal_pos, axis=1)
-        r_goal = 1 - torch.tanh(d_goal)
+        r_goal = 1 - torch.tanh(d_goal / self.goal_dist_scale)
 
         arms = (self.left_agent, self.right_agent)
         r_arms = 0.0
