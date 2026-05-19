@@ -172,6 +172,7 @@ class MultiRobotPassStickDelta(BaseEnv):
                 torch.linalg.norm(arm.tcp.pose.p - stick_pos, axis=1)
                 for arm in self.agent.agents
             ])
+            self.distance_max = torch.linalg.norm(stick_pos - goal_pos, axis=1)
 
     @property
     def left_agent(self) -> Panda:
@@ -234,8 +235,10 @@ class MultiRobotPassStickDelta(BaseEnv):
             delta_arms = delta_arms + (self._last_d_arms[i] - d_arm)
             self._last_d_arms[i] = d_arm.detach().clone()
 
-        reward = delta_goal + self.alpha * delta_arms / len(arms)
-        reward[info["success"]] = 3.0
+
+        reward = (delta_goal + self.alpha * delta_arms / len(arms)) / self.distance_max
+        reward[info["success"]] = 1 + reward
+
         return reward
 
     def compute_normalized_dense_reward(
