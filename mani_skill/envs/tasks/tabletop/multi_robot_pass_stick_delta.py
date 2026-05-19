@@ -188,10 +188,12 @@ class MultiRobotPassStickDelta(BaseEnv):
         is_left_grasping = self.left_agent.is_grasping(self.stick,0.5,45)
         is_right_grasping = self.right_agent.is_grasping(self.stick,0.5,45)
 
-        stick_at_goal = (
+        stick_xy_at_goal = (
             torch.linalg.norm(stick_pos[:, :2] - goal_pos[:, :2], axis=1)
             <= self.goal_radius
         )
+        stick_z_at_goal = torch.abs(stick_pos[:, 2] - goal_pos[:, 2]) <= 0.02
+        stick_at_goal = stick_xy_at_goal & stick_z_at_goal
         success = stick_at_goal
 
         return {
