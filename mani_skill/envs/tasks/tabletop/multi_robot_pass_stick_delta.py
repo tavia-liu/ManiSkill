@@ -237,7 +237,7 @@ class MultiRobotPassStickDelta(BaseEnv):
 
 
         reward = (delta_goal + self.alpha * delta_arms / len(arms)) / self.distance_max
-        reward[info["success"]] = 1 + reward
+        reward = reward + info["success"].float()
 
         return reward
 
